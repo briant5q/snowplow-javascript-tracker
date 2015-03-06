@@ -1,6 +1,6 @@
 /*
  * JavaScript tracker core for Snowplow: core.js
- * 
+ *
  * Copyright (c) 2014 Snowplow Analytics Ltd. All rights reserved.
  *
  * This program is licensed to you under the Apache License Version 2.0,
@@ -79,7 +79,7 @@ function trackerCore(base64, callback) {
 	/**
 	 * Gets called by every trackXXX method
 	 * Adds context and payloadPairs name-value pairs to the payload
-	 * Applies the callback to the built payload 
+	 * Applies the callback to the built payload
 	 *
 	 * @param sb object Payload
 	 * @param array contexts Custom contexts relating to the event
@@ -91,9 +91,9 @@ function trackerCore(base64, callback) {
 		sb.add('eid', uuid.v4());
 		sb.add('dtm', tstamp || new Date().getTime());
 		if (context) {
-			sb.addJson('cx', 'co', completeContexts(context));			
+			sb.addJson('cx', 'co', completeContexts(context));
 		}
-		
+
 		if (typeof callback === 'function') {
 			callback(sb);
 		}
@@ -106,7 +106,7 @@ function trackerCore(base64, callback) {
 	 *
 	 * @param object eventJson Contains the properties and schema location for the event
 	 * @param array context Custom contexts relating to the event
-	 * @param number tstamp Timestamp of the event	 
+	 * @param number tstamp Timestamp of the event
 	 * @return object Payload
 	 */
 	function trackUnstructEvent(properties, context, tstamp) {
@@ -134,11 +134,11 @@ function trackerCore(base64, callback) {
 		},
 
 		addPayloadPair: addPayloadPair,
-		
+
 		/**
 		 * Merges a dictionary into payloadPairs
 		 *
-		 * @param object dict Dictionary to add 
+		 * @param object dict Dictionary to add
 		 */
 		addPayloadDict: function (dict) {
 			for (var key in dict) {
@@ -286,11 +286,12 @@ function trackerCore(base64, callback) {
 		 * @param maxXOffset Maximum page x offset seen in the last ping period
 		 * @param minYOffset Minimum page y offset seen in the last ping period
 		 * @param maxYOffset Maximum page y offset seen in the last ping period
+	 	 * @param number elapsedTime Total Elapsed Time the user has spent engaging the page
 		 * @param array context Custom contexts relating to the event
 		 * @param number tstamp Timestamp of the event
 		 * @return object Payload
 		 */
-		trackPagePing: function (pageUrl, pageTitle, referrer, minXOffset, maxXOffset, minYOffset, maxYOffset, context, tstamp) {
+		trackPagePing: function (pageUrl, pageTitle, referrer, minXOffset, maxXOffset, minYOffset, maxYOffset, elapsedTime, context, tstamp) {
 			var sb = payload.payloadBuilder(base64);
 			sb.add('e', 'pp'); // 'pp' for Page Ping
 			sb.add('url', pageUrl);
@@ -300,6 +301,7 @@ function trackerCore(base64, callback) {
 			sb.add('pp_max', maxXOffset);
 			sb.add('pp_miy', minYOffset);
 			sb.add('pp_may', maxYOffset);
+			sb.add('pp_elapsed', elapsedTime);
 
 			return track(sb, context, tstamp);
 		},
@@ -436,7 +438,7 @@ function trackerCore(base64, callback) {
 		 * Track an ad being served
 		 *
 		 * @param string impressionId Identifier for a particular ad impression
-		 * @param string costModel The cost model. 'cpa', 'cpc', or 'cpm'			 
+		 * @param string costModel The cost model. 'cpa', 'cpc', or 'cpm'
 		 * @param number cost Cost
 		 * @param string bannerId Identifier for the ad banner displayed
 		 * @param string zoneId Identifier for the ad zone
@@ -451,10 +453,10 @@ function trackerCore(base64, callback) {
 				schema: 'iglu:com.snowplowanalytics.snowplow/ad_impression/jsonschema/1-0-0',
 				data: removeEmptyProperties({
 					impressionId: impressionId,
-					costModel: costModel,						
+					costModel: costModel,
 					cost: cost,
 					targetUrl: targetUrl,
-					bannerId: bannerId,				
+					bannerId: bannerId,
 					zoneId: zoneId,
 					advertiserId: advertiserId,
 					campaignId: campaignId
@@ -468,7 +470,7 @@ function trackerCore(base64, callback) {
 		 * Track an ad being clicked
 		 *
 		 * @param string clickId Identifier for the ad click
-		 * @param string costModel The cost model. 'cpa', 'cpc', or 'cpm'			 
+		 * @param string costModel The cost model. 'cpa', 'cpc', or 'cpm'
 		 * @param number cost Cost
 		 * @param string targetUrl (required) The link's target URL
 		 * @param string bannerId Identifier for the ad banner displayed
@@ -520,14 +522,14 @@ function trackerCore(base64, callback) {
 				schema: 'iglu:com.snowplowanalytics.snowplow/ad_conversion/jsonschema/1-0-0',
 				data: removeEmptyProperties({
 					conversionId: conversionId,
-					costModel: costModel,					
+					costModel: costModel,
 					cost: cost,
 					category: category,
 					action: action,
 					property: property,
 					initialValue: initialValue,
 					advertiserId: advertiserId,
-					campaignId: campaignId					
+					campaignId: campaignId
 				})
 			};
 
