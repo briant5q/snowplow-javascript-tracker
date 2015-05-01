@@ -78,6 +78,8 @@
 	 * 14. contexts, {}
 	 * 15. post, false
 	 * 16. bufferSize, 1
+	 * 17. crossDomainLinker, false
+	 * 18. maxPostBytes, 40000
 	 */
 	object.Tracker = function Tracker(functionName, namespace, version, mutSnowplowState, argmap) {
 
@@ -101,6 +103,8 @@
 			domainAlias = helpers.fixupDomain(locationArray[0]),
 			locationHrefAlias = locationArray[1],
 			configReferrerUrl = locationArray[2],
+
+			customReferrer,
 
 			argmap = argmap || {},
 
@@ -221,13 +225,20 @@
 			ecommerceTransaction = ecommerceTransactionTemplate(),
 
 			// Manager for automatic link click tracking
-			linkTrackingManager = links.getLinkTrackingManager(core, trackerId),
+			linkTrackingManager = links.getLinkTrackingManager(core, trackerId, addCommonContexts),
 
 			// Manager for automatic form tracking
-			formTrackingManager = forms.getFormTrackingManager(core, trackerId),
+			formTrackingManager = forms.getFormTrackingManager(core, trackerId, addCommonContexts),
 
 			// Manager for local storage queue
-			outQueueManager = new requestQueue.OutQueueManager(functionName, namespace, mutSnowplowState, useLocalStorage, argmap.post, argmap.bufferSize),
+			outQueueManager = new requestQueue.OutQueueManager(
+				functionName,
+				namespace,
+				mutSnowplowState,
+				useLocalStorage,
+				argmap.post,
+				argmap.bufferSize,
+				argmap.maxPostBytes || 40000),
 
 			// Flag to prevent the geolocation context being added multiple times
 			geolocationContextAdded = false,
@@ -237,10 +248,6 @@
 
 			// Context to be added to every event
 			commonContexts = [];
-
-		if (autoContexts.performanceTiming) {
-			commonContexts.push(getPerformanceTimingContext());
-		}
 
 		if (autoContexts.gaCookies) {
 			commonContexts.push(getGaCookiesContext());
@@ -269,6 +276,56 @@
 					core.addPayloadPair(i, browserFeatures[i]);
 				} else {
 					core.addPayloadPair('f_' + i, browserFeatures[i]);
+				}
+			}
+		}
+
+		/**
+		 * Recalculate the domain, URL, and referrer
+		 */
+		function refreshUrl() {
+			locationArray = proxies.fixupUrl(documentAlias.domain, windowAlias.location.href, helpers.getReferrer());
+
+			// If this is a single-page app and the page URL has changed, then:
+			//   - if the new URL's querystring contains a "refer(r)er" parameter, use it as the referrer
+			//   - otherwise use the old URL as the referer
+			if (locationArray[1] !== locationHrefAlias) {
+				configReferrerUrl = helpers.getReferrer(locationHrefAlias);
+			}
+
+			domainAlias = helpers.fixupDomain(locationArray[0]);
+			locationHrefAlias = locationArray[1];
+		}
+
+		/**
+		 * Decorate the querystring of a single link
+		 *
+		 * @param event e The event targeting the link
+		 */
+		function linkDecorationHandler(e) {
+			var tstamp = new Date().getTime();
+			var initialQsParams = '_sp=' + domainUserId + '.' + tstamp;
+			if (this.href) {
+				this.href = helpers.decorateQuerystring(this.href, '_sp', domainUserId + '.' + tstamp);
+			}
+		}
+
+		/**
+		 * Enable querystring decoration for links pasing a filter
+		 * Whenever such a link is clicked on or navigated to via the keyboard,
+		 * add "_sp={{duid}}.{{timestamp}}" to its querystring
+		 *
+		 * @param function crossDomainLinker Function used to determine which links to decorate
+		 */
+		function decorateLinks(crossDomainLinker) {
+			for (var i=0; i<document.links.length; i++) {
+				var elt = document.links[i];
+				if (!elt.spDecorationEnabled && crossDomainLinker(elt)) {
+					helpers.addEventListener(elt, 'click', linkDecorationHandler, true);
+					helpers.addEventListener(elt, 'mousedown', linkDecorationHandler, true);
+
+					// Don't add event listeners more than once
+					elt.spDecorationEnabled = true;
 				}
 			}
 		}
@@ -368,6 +425,7 @@
 		 * Update domain hash
 		 */
 		function updateDomainHash() {
+			refreshUrl();
 			domainHash = hash((configCookieDomain || domainAlias) + (configCookiePath || '/')).slice(0, 4); // 4 hexits = 16 bits
 		}
 
@@ -448,11 +506,67 @@
 		}
 
 		/*
+		 * Sets or renews the session cookie
+		 */
+		function setSessionCookie() {
+			cookie.cookie(getSnowplowCookieName('ses'), '*', configSessionCookieTimeout, configCookiePath, configCookieDomain);
+		}
+
+		/*
 		 * Sets the Visitor ID cookie: either the first time loadDomainUserIdCookie is called
 		 * or when there is a new visit or a new page view
 		 */
 		function setDomainUserIdCookie(_domainUserId, createTs, visitCount, nowTs, lastVisitTs) {
 			cookie.cookie(getSnowplowCookieName('id'), _domainUserId + '.' + createTs + '.' + visitCount + '.' + nowTs + '.' + lastVisitTs, configVisitorCookieTimeout, configCookiePath, configCookieDomain);
+		}
+
+		/**
+		 * Generate a pseudo-unique ID to fingerprint this user
+		 * Note: this isn't a RFC4122-compliant UUID
+		 */
+		function createNewDomainUserId() {
+			return hash(
+				(navigatorAlias.userAgent || '') +
+					(navigatorAlias.platform || '') +
+					json2.stringify(browserFeatures) + Math.round(new Date().getTime() / 1000)
+			).slice(0, 16); // 16 hexits = 64 bits
+		}
+
+		/*
+		 * Generate a new domainUserId and write it to a cookie
+		 */
+		function generateNewDomainUserId() {
+			domainUserId = createNewDomainUserId();
+			if (configUseCookies && configWriteCookies) {
+				var nowTs = Math.round(new Date().getTime() / 1000);
+				setDomainUserIdCookie(domainUserId, nowTs, 0, nowTs, nowTs);
+			}
+		}
+
+		/*
+		 * Try to load the domainUserId from the cookie
+		 * If this fails, generate a new one
+		 * If there is no session cookie, set one and increment the visit count
+		 */
+		function initializeDomainUserId() {
+			var idCookieValue;
+			if (configUseCookies) {
+				idCookieValue = getSnowplowCookieValue('id');
+			}
+			if (idCookieValue) {
+				domainUserId = idCookieValue.split('.')[0];
+			} else {
+				generateNewDomainUserId();
+			}
+			if (configUseCookies && configWriteCookies) {
+				if (!getSnowplowCookieValue('ses')) {
+					var idCookie = loadDomainUserIdCookie();
+					idCookie[3] ++;
+					idCookie.shift();
+					setDomainUserIdCookie.apply(null, idCookie);
+				}
+				setSessionCookie();
+			}
 		}
 
 		/*
@@ -472,15 +586,6 @@
 				// New visitor set to 0 now
 				tmpContainer.unshift('0');
 			} else {
-				// Domain - generate a pseudo-unique ID to fingerprint this user;
-				// Note: this isn't a RFC4122-compliant UUID
-				if (!domainUserId) {
-					domainUserId = hash(
-						(navigatorAlias.userAgent || '') +
-							(navigatorAlias.platform || '') +
-							json2.stringify(browserFeatures) + nowTs
-					).slice(0, 16); // 16 hexits = 64 bits
-				}
 
 				tmpContainer = [
 					// New visitor
@@ -539,19 +644,17 @@
 			sb.add('fp', userFingerprint);
 			sb.add('uid', businessUserId);
 
-			// Adds with custom conditions
-			if (configReferrerUrl.length) {
-				sb.add('refr', purify(configReferrerUrl));
-			}
+			refreshUrl();
+
+			sb.add('refr', purify(customReferrer || configReferrerUrl));
 
 			// Add the page URL last as it may take us over the IE limit (and we don't always need it)
 			sb.add('url', purify(configCustomUrl || locationHrefAlias));
 
-
 			// Update cookies
 			if (configUseCookies && configWriteCookies) {
 				setDomainUserIdCookie(_domainUserId, createTs, visitCount, nowTs, lastVisitTs);
-				cookie.cookie(sesname, '*', configSessionCookieTimeout, configCookiePath, configCookieDomain);
+				setSessionCookie();
 			}
 		}
 
@@ -589,7 +692,14 @@
 		 * @return userContexts combined with commonContexts
 		 */
 		function addCommonContexts(userContexts) {
-			return commonContexts.concat(userContexts || []);
+			var combinedContexts = commonContexts.concat(userContexts || []);
+			if (autoContexts.performanceTiming) {
+				var performanceTimingContext = getPerformanceTimingContext();
+				if (performanceTimingContext) {
+					combinedContexts.push(performanceTimingContext);
+				}
+			}
+			return combinedContexts;
 		}
 
 		/**
@@ -682,8 +792,10 @@
 			// Fixup page title. We'll pass this to logPagePing too.
 			var pageTitle = helpers.fixupTitle(customTitle || configTitle);
 
+			refreshUrl();
+
 			// Log page view
-			core.trackPageView(purify(configCustomUrl || locationHrefAlias), pageTitle, purify(configReferrerUrl), addCommonContexts(context));
+			core.trackPageView(purify(configCustomUrl || locationHrefAlias), pageTitle, purify(customReferrer || configReferrerUrl), addCommonContexts(context));
 
 			// Send ping (to log that user has stayed on page)
 			var now = new Date();
@@ -737,10 +849,11 @@
 		 * @param object context Custom context relating to the event
 		 */
 		function logPagePing(pageTitle, elapsedTime, context) {
+			refreshUrl();
 			core.trackPagePing(
 				purify(configCustomUrl || locationHrefAlias),
 				pageTitle,
-				purify(configReferrerUrl),
+				purify(customReferrer || configReferrerUrl),
 				cleanOffset(minXOffset),
 				cleanOffset(maxXOffset),
 				cleanOffset(minYOffset),
@@ -847,6 +960,11 @@
 		 */
 		updateDomainHash();
 
+		initializeDomainUserId();
+
+		if (argmap.crossDomainLinker) {
+			decorateLinks(argmap.crossDomainLinker);
+		}
 
 		/************************************************************
 		 * Public data and methods
@@ -907,7 +1025,7 @@
 			 * @param string url
 			 */
 			setReferrerUrl: function (url) {
-				configReferrerUrl = url;
+				customReferrer = url;
 			},
 
 			/**
@@ -916,6 +1034,7 @@
 			 * @param string url
 			 */
 			setCustomUrl: function (url) {
+				refreshUrl();
 				configCustomUrl = resolveRelativeReference(locationHrefAlias, url);
 			},
 
@@ -1018,6 +1137,15 @@
 				var dnt = navigatorAlias.doNotTrack || navigatorAlias.msDoNotTrack;
 
 				configDoNotTrack = enable && (dnt === 'yes' || dnt === '1');
+			},
+
+			/**
+			 * Enable querystring decoration for links pasing a filter
+			 *
+			 * @param function crossDomainLinker Function used to determine which links to decorate
+			 */
+			crossDomainLinker: function (crossDomainLinkerCriterion) {
+				decorateLinks(crossDomainLinkerCriterion);
 			},
 
 			/**
@@ -1156,6 +1284,7 @@
 			 * @param string queryName Name of a querystring name-value pair
 			 */
 			setUserIdFromLocation: function(querystringField) {
+				refreshUrl();
 				businessUserId = helpers.fromQuerystring(querystringField, locationHrefAlias);
 			},
 
@@ -1165,6 +1294,7 @@
 			 * @param string queryName Name of a querystring name-value pair
 			 */
 			setUserIdFromReferrer: function(querystringField) {
+				refreshUrl();
 				businessUserId = helpers.fromQuerystring(querystringField, configReferrerUrl);
 			},
 
@@ -1490,6 +1620,27 @@
 			 */
 			trackSiteSearch: function(terms, filters, totalResults, pageResults, context) {
 				core.trackSiteSearch(terms, filters, totalResults, pageResults, addCommonContexts(context));
+			},
+
+			/**
+			 * Track a timing event (such as the time taken for a resource to load)
+			 *
+			 * @param string category Required.
+			 * @param string variable Required.
+			 * @param number timing Required.
+			 * @param string label Optional.
+			 * @param array context Optional. Context relating to the event.
+			 */
+			trackTiming: function (category, variable, timing, label, context) {
+				core.trackUnstructEvent({
+					schema: 'iglu:com.snowplowanalytics.snowplow/timing/jsonschema/1-0-0',
+					data: {
+						category: category,
+						variable: variable,
+						timing: timing,
+						label: label
+					}
+				}, addCommonContexts(context))
 			}
 		};
 	};
