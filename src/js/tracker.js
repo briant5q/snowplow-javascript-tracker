@@ -45,7 +45,8 @@
 		links = require('./links'),
 		forms = require('./forms'),
 		requestQueue = require('./out_queue'),
-		coreConstructor = require('snowplow-tracker-core'),
+		//coreConstructor = require('snowplow-tracker-core'),
+		coreConstructor = require('./core')
 
 		object = typeof exports !== 'undefined' ? exports : this; // For eventual node.js environment support
 
